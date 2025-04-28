@@ -15,6 +15,7 @@ typedef struct {
     int sizeMB;
     int pagesNeeded;
     int pagesAllocated;
+    int pendingPages; // Track pending pages for oversized processes
 } Process;
 
 typedef struct {
@@ -57,7 +58,6 @@ int isMemoryFull() {
     return 1;
 }
 
-
 void printMemoryUsage() {
     int occupiedFrames = 0;
     for (int i = 0; i < TOTAL_FRAMES; i++) {
@@ -70,15 +70,28 @@ void printMemoryUsage() {
     printf("------------------------------------------------------------\n");
 }
 
+// Comparison function for sorting processes by arrival time
+int compareProcesses(const void *a, const void *b) {
+    const Process *p1 = (const Process *)a;
+    const Process *p2 = (const Process *)b;
+    return p1->arrivalTime - p2->arrivalTime;
+}
 
 void allocateProcess(Process *p) {
-    int pagesToAllocate = p->pagesNeeded;
+    int pagesToAllocate = p->pendingPages > 0 ? p->pendingPages : 
+                          (p->pagesNeeded > MAX_PAGES_PER_PROCESS ? MAX_PAGES_PER_PROCESS : p->pagesNeeded);
+    
     printf("\n=== Allocating memory for Process %d (Size: %d MB, Arrival Time: %d) ===\n",
            p->processId, p->sizeMB, p->arrivalTime);
+
+    if (p->pendingPages > 0) {
+        printf("Continuing allocation for oversized process (Remaining pages: %d)\n", p->pendingPages);
+    }
 
     // Print header for this process
     printf("| %-10s | %-12s | %-20s | %-10s |\n", "Frame ID", "Process ID", "Arrival Time", "Process Size");
 
+    int framesAllocated = 0;
     while (pagesToAllocate > 0) {
         int allocated = 0;
         for (int i = 0; i < TOTAL_FRAMES; i++) {
@@ -89,6 +102,8 @@ void allocateProcess(Process *p) {
                 enqueue(i);
                 printf("| %-10d | %-12d | %-20d | %-10d |\n", i, p->processId, p->arrivalTime, p->sizeMB);
                 pagesToAllocate--;
+                p->pagesAllocated++;
+                framesAllocated++;
                 allocated = 1;
                 if (pagesToAllocate == 0)
                     break;
@@ -100,16 +115,34 @@ void allocateProcess(Process *p) {
             int frameToFree = dequeue();
             printf("Memory full! Removing Process %d from Frame %d\n",
                    memory[frameToFree].processId, frameToFree);
+            
+            // Find which process this frame belongs to and decrement its allocated pages
+            for (int i = 0; i < MAX_PROCESSES; i++) {
+                if (memory[frameToFree].processId == i + 1) {
+                    // This would need the processes array to be accessible here
+                    // For now, we just acknowledge the deallocation
+                    break;
+                }
+            }
+            
             memory[frameToFree].occupied = 0;
             memory[frameToFree].processId = -1;
             memory[frameToFree].arrivalTime = -1;
         }
     }
 
-    // Display memory usage after each allocation
-    printMemoryUsage();
-}
+    // Update pending pages for oversized processes
+    if (p->pagesNeeded > MAX_PAGES_PER_PROCESS && p->pendingPages == 0) {
+        p->pendingPages = p->pagesNeeded - MAX_PAGES_PER_PROCESS;
+    } else if (p->pendingPages > 0) {
+        p->pendingPages -= framesAllocated;
+    }
 
+    // Only print memory usage after allocation
+    if (framesAllocated > 0) {
+        printMemoryUsage();
+    }
+}
 
 void loadProcessesFromFile(const char *filename, Process processes[], int *processCount) {
     FILE *file = fopen(filename, "r");
@@ -133,12 +166,9 @@ void loadProcessesFromFile(const char *filename, Process processes[], int *proce
         processes[*processCount].sizeMB = sizeMB;
         processes[*processCount].processId = *processCount + 1;
         processes[*processCount].pagesNeeded = (sizeMB + FRAME_SIZE_MB - 1) / FRAME_SIZE_MB;
-
-        // Cap pages per process
-        if (processes[*processCount].pagesNeeded > MAX_PAGES_PER_PROCESS)
-            processes[*processCount].pagesNeeded = MAX_PAGES_PER_PROCESS;
-
         processes[*processCount].pagesAllocated = 0;
+        processes[*processCount].pendingPages = 0;
+        
         (*processCount)++;
 
         if (*processCount >= MAX_PROCESSES) {
@@ -157,6 +187,9 @@ int main() {
     initializeMemory();
     loadProcessesFromFile("processes_file.txt", processes, &processCount);
 
+    // Sort processes by arrival time
+    qsort(processes, processCount, sizeof(Process), compareProcesses);
+
     printf("============================================================\n");
     printf("                    MEMORY MODULE OF OS\n");
     printf("============================================================\n");
@@ -167,10 +200,22 @@ int main() {
     printf("Scheduling Algorithm: First Come First Served (FCFS)\n");
     printf("------------------------------------------------------------\n");
 
-    // Allocate memory to each process in FCFS order
+    // Allocate memory to each process in arrival time order
     for (int i = 0; i < processCount; i++) {
         allocateProcess(&processes[i]);
     }
+    
+    // Handle remaining pages for oversized processes
+    int pendingProcesses = 0;
+    do {
+        pendingProcesses = 0;
+        for (int i = 0; i < processCount; i++) {
+            if (processes[i].pendingPages > 0) {
+                allocateProcess(&processes[i]);
+                pendingProcesses++;
+            }
+        }
+    } while (pendingProcesses > 0);
 
     // Calculate and print Process Size Summary
     int totalProcesses = processCount;
